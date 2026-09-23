@@ -1,22 +1,10 @@
 # src/embed.py
 """
-Embedding stage (ArcFace ONNX) using your working pipeline:
-
-camera
-  -> Haar detection
-  -> FaceMesh 5pt
-  -> align_face_5pt (112x112)
-  -> ArcFace embedding
-  -> vector visualization (education)
-
-Run:
-    python -m src.embed
-
-Keys:
-    q : quit
-    p : print embedding stats to terminal
+camera -> Haar -> FaceMesh 5pt -> align_face_5pt (112x112) -> ArcFace embedding
 """
+
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Tuple, Optional
 import time
@@ -28,26 +16,14 @@ import onnxruntime as ort
 from .haar_5pt import Haar5ptDetector, align_face_5pt
 
 
-# -------------------------
-# Data
-# -------------------------
 @dataclass
 class EmbeddingResult:
-    embedding: np.ndarray  # (D,) float32, L2-normalized
+    embedding: np.ndarray
     norm_before: float
     dim: int
 
 
-# -------------------------
-# Embedder
-# -------------------------
 class ArcFaceEmbedderONNX:
-    """
-    ArcFace / InsightFace-style ONNX embedder.
-    Input: aligned 112x112 BGR image.
-    Output: L2-normalized embedding vector.
-    """
-
     def __init__(
         self,
         model_path: str = "models/embedder_arcface.onnx",
@@ -56,19 +32,7 @@ class ArcFaceEmbedderONNX:
     ):
         self.in_w, self.in_h = input_size
         self.debug = debug
-        
-        # Check if model file exists
-        import os
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"ArcFace ONNX model not found at: {model_path}\n"
-                f"You need to obtain an ArcFace ONNX model and place it at this path.\n"
-                f"Common sources:\n"
-                f"- Convert from PyTorch/TensorFlow models\n"
-                f"- Download from ONNX model zoo or similar repositories\n"
-                f"- Use pre-trained models from face recognition libraries"
-            )
-        
+
         self.sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         self.in_name = self.sess.get_inputs()[0].name
         self.out_name = self.sess.get_outputs()[0].name
@@ -84,8 +48,7 @@ class ArcFaceEmbedderONNX:
 
         rgb = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
         rgb = (rgb - 127.5) / 128.0
-        # Keep NHWC format (batch, height, width, channels) for this model
-        x = rgb[None, ...]  # Add batch dimension: (1, 112, 112, 3)
+        x = np.transpose(rgb, (2, 0, 1))[None, ...]
         return x.astype(np.float32)
 
     @staticmethod
@@ -101,9 +64,6 @@ class ArcFaceEmbedderONNX:
         return EmbeddingResult(v_norm, n0, v_norm.size)
 
 
-# -------------------------
-# Visualization helpers
-# -------------------------
 def draw_text_block(img, lines, origin=(10, 30), scale=0.7, color=(0, 255, 0)):
     x, y = origin
     for line in lines:
@@ -111,16 +71,7 @@ def draw_text_block(img, lines, origin=(10, 30), scale=0.7, color=(0, 255, 0)):
         y += int(28 * scale)
 
 
-def draw_embedding_matrix(
-    img: np.ndarray,
-    emb: np.ndarray,
-    top_left=(10, 220),
-    cell_scale: int = 6,
-    title: str = "embedding"
-):
-    """
-    Visualize embedding vector as a heatmap matrix.
-    """
+def draw_embedding_matrix(img, emb, top_left=(10, 220), cell_scale=6, title="embedding"):
     D = emb.size
     cols = int(np.ceil(np.sqrt(D)))
     rows = int(np.ceil(D / cols))
@@ -132,57 +83,33 @@ def draw_embedding_matrix(
     gray = (norm * 255).astype(np.uint8)
     heat = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
 
-    heat = cv2.resize(
-        heat,
-        (cols * cell_scale, rows * cell_scale),
-        interpolation=cv2.INTER_NEAREST,
-    )
+    heat = cv2.resize(heat, (cols * cell_scale, rows * cell_scale), interpolation=cv2.INTER_NEAREST)
 
     x, y = top_left
     h, w = heat.shape[:2]
-
     ih, iw = img.shape[:2]
     if x + w > iw or y + h > ih:
         return 0, 0
 
     img[y:y+h, x:x+w] = heat
-
-    cv2.putText(
-        img,
-        title,
-        (x, y - 8),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (200, 200, 200),
-        2,
-    )
+    cv2.putText(img, title, (x, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
     return w, h
 
 
-def emb_preview_str(emb: np.ndarray, n: int = 8) -> str:
+def emb_preview_str(emb, n=8):
     vals = " ".join(f"{v:+.3f}" for v in emb[:n])
     return f"vec[0:{n}]: {vals} ..."
 
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+def cosine_similarity(a, b):
     return float(np.dot(a, b))
 
 
-# -------------------------
-# Demo
-# -------------------------
 def main():
-    cap = cv2.VideoCapture(2)
-    det = Haar5ptDetector(
-        min_size=(70, 70),
-        smooth_alpha=0.80,
-        debug=False,
-    )
-    emb_model = ArcFaceEmbedderONNX(
-        model_path="models/embedder_arcface.onnx",
-        debug=False,
-    )
+    cap = cv2.VideoCapture(0)
+    det = Haar5ptDetector(min_size=(70, 70), smooth_alpha=0.80, debug=False)
+    emb_model = ArcFaceEmbedderONNX(model_path="models/embedder_arcface.onnx", debug=False)
 
     prev_emb: Optional[np.ndarray] = None
 
@@ -201,16 +128,13 @@ def main():
         faces = det.detect(frame, max_faces=1)
 
         info = []
-
         if faces:
             f = faces[0]
 
-            # draw detection
             cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (0, 255, 0), 2)
             for (x, y) in f.kps.astype(int):
                 cv2.circle(vis, (x, y), 3, (0, 255, 0), -1)
 
-            # align + embed
             aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
             res = emb_model.embed(aligned)
 
@@ -223,39 +147,20 @@ def main():
 
             prev_emb = res.embedding
 
-            # aligned preview (top-right)
             aligned_small = cv2.resize(aligned, (160, 160))
             h, w = vis.shape[:2]
             vis[10:170, w-170:w-10] = aligned_small
 
-            # --------- VISUALIZATION LAYOUT ---------
             draw_text_block(vis, info, origin=(10, 30))
 
-            HEAT_X, HEAT_Y = 10, 220
-            CELL_SCALE = 6
-
-            ww, hh = draw_embedding_matrix(
-                vis,
-                res.embedding,
-                top_left=(HEAT_X, HEAT_Y),
-                cell_scale=CELL_SCALE,
-                title="embedding heatmap",
-            )
+            ww, hh = draw_embedding_matrix(vis, res.embedding, top_left=(10, 220), cell_scale=6, title="embedding heatmap")
 
             if ww > 0:
-                cv2.putText(
-                    vis,
-                    emb_preview_str(res.embedding),
-                    (HEAT_X, HEAT_Y + hh + 28),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (200, 200, 200),
-                    2,
-                )
+                cv2.putText(vis, emb_preview_str(res.embedding), (10, 220 + hh + 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 2)
         else:
             draw_text_block(vis, ["no face"], origin=(10, 30), color=(0, 0, 255))
 
-        # FPS
         frames += 1
         dt = time.time() - t0
         if dt >= 1.0:
@@ -263,8 +168,7 @@ def main():
             frames = 0
             t0 = time.time()
 
-        cv2.putText(vis, f"fps: {fps:.1f}", (10, vis.shape[0] - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(vis, f"fps: {fps:.1f}", (10, vis.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
         cv2.imshow("Face Embedding", vis)
 
